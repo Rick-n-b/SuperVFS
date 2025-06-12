@@ -2,7 +2,7 @@
 
 
 VFS::VFS(const char filename[], uint32_t VF_SIZE, uint16_t CLUSTER_SIZE)
-	: indexFile(filename)
+	
 {
 	std::fstream FS(filename, std::ios::in | std::ios::out | std::ios::binary | std::ios::ate);
 	if (!FS.is_open()) {
@@ -445,11 +445,11 @@ uint32_t findParent(std::fstream& fs, uint32_t clusterId) {
 }
 
 bool isStarting() {
-
+	return 0;
 }
 
 std::vector<std::vector<std::uint32_t>> VFS::getFilewsClusters(std::fstream& fs) {
 	std::vector<std::vector<std::uint32_t>> files;
 	std::vector<std::uint32_t> clusters;
-
+	return files;
 }
