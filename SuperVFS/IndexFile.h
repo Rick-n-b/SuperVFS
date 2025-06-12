@@ -5,11 +5,6 @@
 
 class IndexFile {
 public:
-	IndexFile(const char filename[]);
-	IndexFile();
-	static char filename[];
-	static std::fstream FS;
-
 	//сериализуемые:
 	static uint16_t TYPE; //FAT32++ - тип ФС
 	static uint32_t VF_SIZE; // общий объем системы 

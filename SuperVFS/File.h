@@ -3,6 +3,8 @@
 #include "FAT.h"
 #include "MetaFile.h"
 
+#include <algorithm>
+#include <map>
 #include <vector>
 
 class File {
@@ -19,7 +21,9 @@ public:
 	void save(std::fstream&);
 	void rename(std::fstream&, std::string);
 
-	std::vector<uint32_t> getFiles(std::fstream&);
+	static MetaFile getMeta(std::fstream&, uint32_t);
+
+	std::map<uint32_t, MetaFile> getFiles(std::fstream&);
 	bool addFile(std::fstream&, uint32_t fileClusterId);
 	bool remFile(std::fstream&, uint32_t fileClusterId);
 	bool isInDir(std::fstream&, uint32_t fileClusterId);
@@ -29,7 +33,7 @@ public:
 	uint32_t startClusterId = UINT32_MAX;//узнаём из FAT таблицы
 	MetaFile metaInfo;//загружаем из кластера
 	bool isOpen = false;
-	char* data = new char[5]{0};//в зависимости от метаинформации читаем данные
+	char* data = new char[5]{ 0 };//в зависимости от метаинформации читаем данные
 
 private:
 	bool dirCheck(std::fstream& file);
