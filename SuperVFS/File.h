@@ -12,7 +12,7 @@ public:
 
 	void create(std::fstream&, bool, std::string);
 	void del(std::fstream&);
-	void open(std::fstream&, uint32_t);
+	uint8_t open(std::fstream&, uint32_t);
 	void close();
 	void rewrite(const char*);
 	void rewrite(const char*, size_t);

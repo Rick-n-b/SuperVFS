@@ -88,10 +88,13 @@ uint32_t FAT::addCluster(std::fstream& file, uint32_t clusterId, uint32_t nextCl
 uint32_t FAT::remCluster(std::fstream& file, uint32_t clusterId) {
 	uint32_t cluster = clusterId;
 	uint32_t nextCluster = 0;
+	uint8_t smolFree = 0;
 	do
 	{
 		readCluster(file, cluster, nextCluster);
 		writeCluster(file, cluster, FREE);
+		file.seekp(getClusterAbsLoc(cluster), std::ios::beg);
+		file.write(reinterpret_cast<char*>(&smolFree), sizeof(uint8_t));
 		IndexFile::START_CLUSTER = IndexFile::START_CLUSTER > cluster ? cluster : IndexFile::START_CLUSTER;
 		cluster = nextCluster;
 		IndexFile::FAT_FREE++;

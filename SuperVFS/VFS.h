@@ -27,6 +27,4 @@ public:
 private:
 	IndexFile indexFile;
 	FAT FAT;
-	
-	std::vector<std::vector<std::uint32_t>> getFilewsClusters(std::fstream& fs);
 };

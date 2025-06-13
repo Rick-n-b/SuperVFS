@@ -444,12 +444,307 @@ uint32_t findParent(std::fstream& fs, uint32_t clusterId) {
 	return 0;
 }
 
-bool isStarting() {
+bool isStarting(std::fstream& fs, uint32_t clusterId, uint32_t& index) {
+	unsigned long i;
+	uint8_t clusterPos = 0;
+	
+	fs.seekg(FAT::getClusterAbsLoc(clusterId), std::ios::beg);
+	fs.read(reinterpret_cast<char*>(&clusterPos), sizeof(uint8_t));
+		
+	if (clusterPos == 1) {
+		index += 1;
+		return true;
+	}
+
+	index = 0;
+	return false;
+}
+
+int findFirstUsable(std::fstream& fs, uint32_t beginCluster, uint32_t& outCluster, uint32_t& outValue)
+{
+	uint32_t cluster;
+	uint32_t value = 0;
+	uint8_t found = 0;
+
+
+	for (cluster = beginCluster; cluster <= IndexFile::VF_SIZE / IndexFile::CLUSTER_SIZE; cluster++) {
+		FAT::readCluster(fs, cluster, value);
+		if (value == 0) {
+			found = 1;
+			break;
+		}
+	}
+	if (!found) {
+		return 1;
+	}
+	outCluster = cluster;
+	outValue = value;
 	return 0;
 }
 
-std::vector<std::vector<std::uint32_t>> VFS::getFilewsClusters(std::fstream& fs) {
-	std::vector<std::vector<std::uint32_t>> files;
-	std::vector<std::uint32_t> clusters;
-	return files;
+void def_switchClusters(std::fstream& fs, uint32_t cluster1, uint32_t cluster2)
+{
+	uint32_t isStarting1, isStarting2; /* if the clusters are starting.
+											   If yes, they will hold (index + 1)
+						   in table aTable
+						*/
+	uint32_t tmpVal1, tmpVal2;
+	uint32_t clus1val, clus2val;
+	int i; // temp variable
+
+	if (cluster1 == cluster2)
+		return;
+
+	/* 1. find out if clusters are starting. If yes, update dir entry. */
+	/* be careful on root! It can be one of the clusters */
+	isStarting(fs, cluster1, isStarting1);
+	isStarting(fs, cluster2, isStarting2);
+
+
+	if (isStarting1) {
+		if (!aTable[isStarting1 - 1].entryCluster) {
+			/* the first cluster is root */
+			
+			bpb.BPB_RootClus = cluster2;
+			d_writeSectors(0, (char*)&bpb, 1, bpb.BPB_SecPerClus);
+		}
+		else {
+			f32_readCluster(aTable[isStarting1 - 1].entryCluster, entries);
+			f32_setStartCluster(cluster2, &entries[aTable[isStarting1 - 1].entryIndex]);
+			f32_writeCluster(aTable[isStarting1 - 1].entryCluster, entries);
+		}
+	}
+	if (isStarting2) {
+		if (!aTable[isStarting2 - 1].entryCluster) {
+			/* second cluster is root */
+			bpb.BPB_RootClus = cluster1;
+			d_writeSectors(0, (char*)&bpb, 1, bpb.BPB_SecPerClus);
+		}
+		else {
+			f32_readCluster(aTable[isStarting2 - 1].entryCluster, entries);
+			if (debug_mode) {
+				fprintf(output_stream, "    2:'");
+				for (i = 0; i < 8; i++)
+					fprintf(output_stream, "%c", entries[aTable[isStarting2 - 1].entryIndex].fileName[i]);
+				fprintf(output_stream, _("' 0x%lx=(files[%lx]); dir=0x%lx.entry=%d; start=0x%lx (new 0x%lx)\n"),
+					cluster2, isStarting2 - 1, aTable[isStarting2 - 1].entryCluster, aTable[isStarting2 - 1].entryIndex,
+					f32_getStartCluster(entries[aTable[isStarting2 - 1].entryIndex]), cluster1);
+			}
+			f32_setStartCluster(cluster1, &entries[aTable[isStarting2 - 1].entryIndex]);
+			f32_writeCluster(aTable[isStarting2 - 1].entryCluster, entries);
+		}
+	}
+	/* 2. update FAT */
+	if (f32_readFAT(cluster1, &clus1val)) error(0, _("Can't read from FAT !"));
+	if (f32_readFAT(cluster2, &clus2val)) error(0, _("Can't read from FAT !"));
+	/* If some or both clusters were part of the chain, it is necessary to update its/their
+	   parents in FAT.
+
+	   In a case that FAT is wrong and some cluster points at free cluster (i.e. clus1val or clus2val = 0),
+	   cruel error will be created, because the parent won't be found. */
+	if (!isStarting1 && clus1val)
+		tmpVal1 = def_findParent(cluster1);
+	else tmpVal1 = 0;
+	if (!isStarting2 && clus2val)
+		tmpVal2 = def_findParent(cluster2);
+	else tmpVal2 = 0;
+	if (tmpVal1) {
+		
+		f32_writeFAT(tmpVal1, cluster2);
+	}
+	if (tmpVal2) {
+	
+		f32_writeFAT(tmpVal2, cluster1);
+	}
+	/* switching FAT values */
+	if (clus1val == cluster2) {
+		/* precaution */
+		f32_writeFAT(cluster1, clus2val);
+		f32_writeFAT(cluster2, cluster1);
+	}
+	else if (clus2val == cluster1) {
+		/* precaution from the other side */
+		/* If cluster1 < cluster2, we should not consider this option.. */
+		f32_writeFAT(cluster1, cluster2);
+		f32_writeFAT(cluster2, clus1val);
+	}
+	else {
+		f32_writeFAT(cluster1, clus2val);
+		f32_writeFAT(cluster2, clus1val);
+	}
+
+	/* update aTable */
+	if (isStarting1)
+		aTable[isStarting1 - 1].startCluster = cluster2;
+	if (isStarting2)
+		aTable[isStarting2 - 1].startCluster = cluster1;
+
+	/* If some of switched clusters was direntry of some starting cluster in aTable, we have to update
+	   also this value */
+	for (tmpVal1 = 0; tmpVal1 < tableCount; tmpVal1++) {
+		if (aTable[tmpVal1].entryCluster == cluster1) {
+			tmpVal2 = aTable[tmpVal1].entryCluster;
+			aTable[tmpVal1].entryCluster = cluster2;
+			
+		}
+		else if (aTable[tmpVal1].entryCluster == cluster2) {
+			tmpVal2 = aTable[tmpVal1].entryCluster;
+			aTable[tmpVal1].entryCluster = cluster1;
+			
+		}
+	}
+
+	/* 3. physicall switch */
+	f32_readCluster(cluster1, cacheCluster1);
+	f32_readCluster(cluster2, cacheCluster2);
+	f32_writeCluster(cluster1, cacheCluster2);
+	f32_writeCluster(cluster2, cacheCluster1);
+
+	
+
+	/* Update "." and ".." entries if one of starting cluster was directory*/
+
+	// if a directory is moving somewhere else, 
+	// in all its dir entries we must find subdirectories,
+	// load their entries and at every '..' entry put the new value
+	// of the directory cluster..
+	if ((entries2 = (F32_DirEntry*)malloc(entryCount * sizeof(F32_DirEntry))) == NULL) {
+		error(0, _("Out of memory !"));
+	}
+
+	if (isStarting1 && aTable[isStarting1 - 1].isDir) {
+		// cluster1 will point to cluster2
+		for (tmpVal1 = cluster2; !F32_LAST(tmpVal1); tmpVal1 = f32_getNextCluster(tmpVal1)) {
+			f32_readCluster(tmpVal1, entries);
+			if (!memcmp(entries[0].fileName, ".       ", 8)) {
+				// found it
+				
+				f32_setStartCluster(cluster2, &entries[0]);
+			}
+			if (!memcmp(entries[1].fileName, "..      ", 8)) {
+				tmpVal2 = def_findParent(tmpVal1);
+				// found it
+				
+				f32_setStartCluster(tmpVal2, &entries[1]);
+			}
+			f32_writeCluster(tmpVal1, entries);
+
+			for (i = 0; i < entryCount; i++) {
+				if (!memcmp(entries[i].fileName, ".       ", 8)) continue;
+				if (!memcmp(entries[i].fileName, ".       ", 8)) continue;
+				if (entries[i].fileName[0] == 0) continue;
+				if (entries[i].fileName[0] == 0xe5) continue;
+				if ((entries[i].attributes & 0x10) == 0x10) {
+					// subdirectory
+					tmpVal2 = f32_getStartCluster(entries[i]);
+					f32_readCluster(tmpVal2, entries2);
+					if (!memcmp(entries2[1].fileName, "..      ", 8)) {
+				
+						f32_setStartCluster(cluster2, &entries2[1]);
+						f32_writeCluster(tmpVal2, entries2);
+					}
+				}
+			}
+		}
+	}
+	if (isStarting2 && aTable[isStarting2 - 1].isDir) {
+		for (tmpVal1 = cluster1; !F32_LAST(tmpVal1); tmpVal1 = f32_getNextCluster(tmpVal1)) {
+			// cluster2 will point to cluster1
+			f32_readCluster(tmpVal1, entries);
+			if (!memcmp(entries[0].fileName, ".       ", 8)) {
+				// found it
+				
+				f32_setStartCluster(cluster1, &entries[0]);
+			}
+			if (!memcmp(entries[1].fileName, "..      ", 8)) {
+				tmpVal2 = def_findParent(tmpVal1);
+				// found it
+				
+				f32_setStartCluster(tmpVal2, &entries[1]);
+			}
+			f32_writeCluster(tmpVal1, entries);
+			for (i = 0; i < entryCount; i++) {
+				if (!memcmp(entries[i].fileName, ".       ", 8)) continue;
+				if (!memcmp(entries[i].fileName, ".       ", 8)) continue;
+				if (entries[i].fileName[0] == 0) continue;
+				if (entries[i].fileName[0] == 0xe5) continue;
+				if ((entries[i].attributes & 0x10) == 0x10) {
+					// subdirectory
+					tmpVal2 = f32_getStartCluster(entries[i]);
+					f32_readCluster(tmpVal2, entries2);
+					if (!memcmp(entries2[1].fileName, "..      ", 8)) {
+						
+						f32_setStartCluster(cluster1, &entries2[1]);
+						f32_writeCluster(tmpVal2, entries2);
+					}
+				}
+			}
+		}
+	}
+	free(entries2);
+}
+
+int def_optimizeStartCluster(std::fstream& fs, unsigned long startCluster, unsigned long beginCluster, unsigned long* outputCluster)
+{
+	uint32_t newCluster, value;
+
+	if (startCluster == beginCluster)
+		return 0;
+
+	if (findFirstUsable(fs, beginCluster, newCluster, value))
+		return 1;
+	if (startCluster > newCluster) {
+		
+		def_switchClusters(fs, startCluster, newCluster);
+		if (newCluster > beginCluster)
+			*outputCluster = newCluster;
+	}
+	return 0;
+}
+
+int def_defragTable()
+{
+	unsigned long tableIndex;
+	unsigned long defClus = 1;
+	unsigned long i, j = 0, k = 0;
+
+	fprintf(output_stream, _("Defragmenting disk...\n"));
+
+	/* Allocation of direntry and temporary clusters */
+	entryCount = (bpb.BPB_SecPerClus * info.BPSector) / sizeof(F32_DirEntry);
+	if ((entries = (F32_DirEntry*)malloc(entryCount * sizeof(F32_DirEntry))) == NULL) error(0, _("Out of memory !"));
+	if ((cacheCluster1 = (unsigned char*)malloc(bpb.BPB_SecPerClus * info.BPSector * sizeof(unsigned char))) == NULL) error(0, _("Out of memory !"));
+	if ((cacheCluster2 = (unsigned char*)malloc(bpb.BPB_SecPerClus * info.BPSector * sizeof(unsigned char))) == NULL) error(0, _("Out of memory !"));
+
+	if (debug_mode) {
+		fprintf(output_stream, _("(def_defragTable) original aTable values (%lu): "), tableCount);
+		for (tableIndex = 0; tableIndex < tableCount; tableIndex++)
+			fprintf(output_stream, "%lx | ", aTable[tableIndex].startCluster);
+	}
+
+	clusterIndex = 0;
+	for (tableIndex = 0; tableIndex < tableCount; tableIndex++) {
+		/* Optimally places starting cluster, it can cause additional fragmentation */
+		defClus++;
+		def_optimizeStartCluster(aTable[tableIndex].startCluster, defClus, &defClus);
+		clusterIndex++;
+		/* Defragmentation of non-starting clusters */
+		defClus = def_defragFile(aTable[tableIndex].startCluster);
+
+		if (!debug_mode)
+			print_bar(30);
+	}
+	fprintf(output_stream, "\n");
+
+	if (debug_mode) {
+		fprintf(output_stream, _("(def_defragTable) aTable values (%lu): "), tableCount);
+		for (tableIndex = 0; tableIndex < tableCount; tableIndex++)
+			fprintf(output_stream, "%lx | ", aTable[tableIndex].startCluster);
+	}
+
+	free(cacheCluster2);
+	free(cacheCluster1);
+	free(entries);
+
+	return 0;
 }

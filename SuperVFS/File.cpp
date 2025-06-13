@@ -19,45 +19,40 @@ void File::del(std::fstream& file) {
 	if (isOpen == true || (startClusterId <= 1))
 		return;
 	if (metaInfo.isDir) {
-		for (auto it : getFiles(file))
+		for (auto it : getFiles(file)) {
 			FAT::remCluster(file, it.first);
-		close();
+		}
 	}
 	FAT::remCluster(file, startClusterId);
+	close();
 	file.flush();
 }
 
-void File::open(std::fstream& file, uint32_t startClusterId) {
+uint8_t File::open(std::fstream& file, uint32_t startClusterId) {
 	if (isOpen == true || startClusterId >= UINT32_MAX - 1)
 		return;
-
-	if (!file.good()) {
-		if (file.eof())
-			std::cerr << "EOF\n";
-		if (file.fail())
-			std::cerr << "Format\n";
-		if (file.bad())
-			std::cerr << "Critical strike\n";
-		if (!file.is_open())
-			std::cerr << "File isnt open\n";
-		file.clear();
-	}
+	uint8_t eof = UINT8_MAX;
+	uint8_t clusterCount = 1;
 	this->startClusterId = startClusterId;
 	file.seekg(FAT::getClusterAbsLoc(startClusterId), std::ios::beg);
+	file.read(reinterpret_cast<char*>(&clusterCount), sizeof(uint8_t));
 	size_t metaSize = Serializer<MetaFile>::deserialize(metaInfo, file);
+	
 	file.sync();
 	isOpen = true;
 	data = new char[metaInfo.size + 1];
 
-	if (metaInfo.size + metaSize < IndexFile::CLUSTER_SIZE) {
+	if (metaInfo.size + metaSize + sizeof(uint8_t) < IndexFile::CLUSTER_SIZE) {
 		file.read(data, metaInfo.size);
+		return eof;
 	}
 	else {
+		
 		int32_t dataRemain = metaInfo.size;
 		uint32_t thisCluster = startClusterId;
 		uint32_t nextClusterId = startClusterId;
-
-		file.read(data, metaInfo.size - IndexFile::CLUSTER_SIZE);
+		file.read(reinterpret_cast<char*>(&clusterCount), sizeof(uint8_t));
+		file.read(data, IndexFile::CLUSTER_SIZE - metaSize - sizeof(uint8_t));
 		data += IndexFile::CLUSTER_SIZE - metaSize;
 		dataRemain -= IndexFile::CLUSTER_SIZE - metaSize;
 
@@ -65,20 +60,22 @@ void File::open(std::fstream& file, uint32_t startClusterId) {
 			if (thisCluster >= UINT32_MAX - 1)
 				break;
 
-			file.seekg(FAT::getClusterFatLoc(thisCluster));
+			file.seekg(FAT::getClusterFatLoc(thisCluster), std::ios::beg);
 			file.read(reinterpret_cast<char*>(&nextClusterId), sizeof(uint32_t));
 
-			file.seekg(FAT::getClusterAbsLoc(nextClusterId));
-			if (dataRemain < IndexFile::CLUSTER_SIZE) {
+			file.seekg(FAT::getClusterAbsLoc(nextClusterId), std::ios::beg);
+			if (dataRemain + sizeof(uint8_t) < IndexFile::CLUSTER_SIZE) {
+				file.read(reinterpret_cast<char*>(&eof), sizeof(uint8_t));
 				file.read(data, dataRemain);
 				data += dataRemain;
 			}
 			else {
-				file.read(data, IndexFile::CLUSTER_SIZE);
-				data += IndexFile::CLUSTER_SIZE;
+				file.read(reinterpret_cast<char*>(&clusterCount), sizeof(uint8_t));
+				file.read(data, IndexFile::CLUSTER_SIZE - sizeof(uint8_t));
+				data += IndexFile::CLUSTER_SIZE - sizeof(uint8_t);
 			}
 
-			dataRemain -= IndexFile::CLUSTER_SIZE;
+			dataRemain -= IndexFile::CLUSTER_SIZE - sizeof(uint8_t);
 
 			thisCluster = nextClusterId;
 			file.sync();
@@ -88,45 +85,37 @@ void File::open(std::fstream& file, uint32_t startClusterId) {
 		data -= metaInfo.size;
 	}
 	file.sync();
+	return clusterCount;
 }
 
 void File::save(std::fstream& file) {
 	if (startClusterId >= UINT32_MAX - 1 && !isOpen)
 		return;
 	//сохранение метаданных на место нечала первого кластера
-
-	if (!file.good()) {
-		if (file.eof())
-			std::cerr << "EOF\n";
-		if (file.fail())
-			std::cerr << "Format\n";
-		if (file.bad())
-			std::cerr << "Critical strike\n";
-		if (!file.is_open())
-			std::cerr << "File isnt open\n";
-		file.clear();
-	}
-
-	std::cout << metaInfo.name << "\tcluster:" << startClusterId << "\n";
-
+	uint8_t clusterIndex = 1;
+	uint8_t smolEnd = UINT8_MAX;
 	file.seekp(FAT::getClusterAbsLoc(startClusterId), std::ios::beg);
+	
+	
 	size_t metaSize = Serializer<MetaFile>::serialize(metaInfo, file);
 
-	if (metaInfo.size + metaSize < IndexFile::CLUSTER_SIZE) {
+	if (metaInfo.size + metaSize + sizeof(uint8_t) < IndexFile::CLUSTER_SIZE) {
+		file.write(reinterpret_cast<char*>(&smolEnd), sizeof(uint8_t));
 		file.write(data, metaInfo.size);
 	}
 	else {
 		int32_t dataRemain = metaInfo.size;
 		uint32_t nextClusterId = startClusterId;
 		uint32_t thisCluster = startClusterId;
-
-		file.write(data, metaInfo.size - IndexFile::CLUSTER_SIZE);
+		file.write(reinterpret_cast<char*>(&clusterIndex), sizeof(uint8_t));
+		file.write(data, metaInfo.size - sizeof(uint8_t) - IndexFile::CLUSTER_SIZE);
 		file.flush();
 
-		data += IndexFile::CLUSTER_SIZE - metaSize;
-		dataRemain -= IndexFile::CLUSTER_SIZE - metaSize;
+		data += IndexFile::CLUSTER_SIZE - sizeof(uint8_t) - metaSize;
+		dataRemain -= IndexFile::CLUSTER_SIZE - sizeof(uint8_t) - metaSize;
 	
 		do {
+			clusterIndex++;
 			FAT::readCluster(file, thisCluster, nextClusterId);
 			file.sync();
 
@@ -136,28 +125,35 @@ void File::save(std::fstream& file) {
 			}
 
 			file.seekp(FAT::getClusterAbsLoc(nextClusterId));
-
-			if (dataRemain < IndexFile::CLUSTER_SIZE) {
+			
+			
+			if (dataRemain < IndexFile::CLUSTER_SIZE - sizeof(uint8_t)) {
+				file.write(reinterpret_cast<char*>(&smolEnd), sizeof(uint8_t));
 				file.write(data, dataRemain);
 				data += dataRemain;
 			}
 			else {
-				file.write(data, IndexFile::CLUSTER_SIZE);
-				data += IndexFile::CLUSTER_SIZE;
+				file.write(reinterpret_cast<char*>(&clusterIndex), sizeof(uint8_t));
+				file.write(data, IndexFile::CLUSTER_SIZE - sizeof(uint8_t));
+				data += IndexFile::CLUSTER_SIZE - sizeof(uint8_t);
+				thisCluster = nextClusterId;
 			}
 
 			file.flush();
 
-			dataRemain -= IndexFile::CLUSTER_SIZE;
+			dataRemain -= IndexFile::CLUSTER_SIZE - sizeof(uint8_t);
 
-			thisCluster = nextClusterId;
+			
 
 		} while (dataRemain > 0);
 
 
 
-		//if (nextClusterId != UINT32_MAX)//???
-		//	FAT::remCluster(file, nextClusterId);
+		if (nextClusterId != UINT32_MAX) {
+			FAT::remCluster(file, nextClusterId);
+			FAT::writeCluster(file, thisCluster, UINT32_MAX);
+		}
+			
 
 
 		data -= metaInfo.size;
